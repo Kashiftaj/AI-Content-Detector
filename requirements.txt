@@ -1,0 +1,12 @@
+transformers==4.40.0
+datasets==2.18.0
+torch
+pandas
+numpy
+scikit-learn
+matplotlib
+streamlit
+sentencepiece
+python-docx
+pdfplumber
+googletrans==4.0.0-rc1

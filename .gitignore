@@ -1,0 +1,24 @@
+# Python caches
+__pycache__/
+*.pyc
+
+# Virtual environment
+venv/
+env/
+
+# Model files
+models/distilbert_finetuned/
+*.bin
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Data files
+data/raw/*
+data/processed/*
+
+# Streamlit cache
+.streamlit/
+
+# OS files
+.DS_Store

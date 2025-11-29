@@ -7,6 +7,7 @@ venv/
 env/
 
 # Model files
+model/*
 models/distilbert_finetuned/
 *.bin
 

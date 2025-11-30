@@ -220,11 +220,4 @@ if detect_button:
                     else:
                         st.success("✅ This text is likely human-written.")
 
-                    # Show per-sentence breakdown
-                    st.markdown("**Per-sentence breakdown**")
-                    for i, (sent, prob) in enumerate(zip(sentences, ai_probs), start=1):
-                        if prob is None:
-                            display = "n/a"
-                        else:
-                            display = f"{prob*100:.2f}% AI"
-                        st.write(f"{i}. {sent} — **{display}**")
+                    

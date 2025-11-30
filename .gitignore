@@ -23,3 +23,9 @@ data/processed/*
 
 # OS files
 .DS_Store
+
+ai_detector_venv/
+*.dll
+*.pkl
+*.pt
+*.pth

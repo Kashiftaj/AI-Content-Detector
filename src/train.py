@@ -16,6 +16,9 @@ from transformers import (
     Trainer,
     EarlyStoppingCallback,
 )
+import torch
+import torch.nn.functional as F
+from collections import Counter
 import numpy as np
 import evaluate
 import inspect
@@ -74,6 +77,8 @@ def parse_args():
     parser.add_argument("--preprocess_only", action="store_true", help="Only run preprocessing (tokenize + save) and exit")
     parser.add_argument("--preprocessed_dir", type=str, default=None, help="Directory to save/load preprocessed tokenized dataset")
     parser.add_argument("--num_proc", type=int, default=1, help="Number of processes to use for tokenization mapping")
+    parser.add_argument("--use_class_weights", action="store_true", help="Use class weights computed from training set in the loss function to address imbalance")
+    parser.add_argument("--label_smoothing", type=float, default=0.0, help="Label smoothing factor (0.0 = disabled)")
     
     return parser.parse_args()
 
@@ -190,6 +195,22 @@ def main():
     num_labels = len(labels)
     logger.info(f"Detected labels: {labels} (num_labels={num_labels})")
 
+    # Compute class weights from training set counts (if requested)
+    class_weights = None
+    if args.use_class_weights:
+        counts = Counter(tokenized_train["label"])
+        total = sum(counts.values())
+        # Ensure ordering matches label indices used by the model (labels is sorted set)
+        weights = []
+        for l in labels:
+            c = counts.get(l, 0)
+            if c == 0:
+                weights.append(0.0)
+            else:
+                weights.append(total / (num_labels * float(c)))
+        class_weights = torch.tensor(weights, dtype=torch.float)
+        logger.info("Using class weights: %s", weights)
+
     logger.info("=========== LOADING MODEL ===========")
     model = AutoModelForSequenceClassification.from_pretrained(args.model_name_or_path, num_labels=num_labels)
     data_collator = DataCollatorWithPadding(tokenizer)
@@ -277,7 +298,31 @@ def main():
         if args.early_stopping_patience and not eval_supported:
             logger.warning("Early stopping requested but evaluation is disabled. Early stopping will be skipped.")
 
-    trainer = Trainer(
+    # Custom Trainer to support class-weighted loss and label smoothing
+    class WeightedTrainer(Trainer):
+        def __init__(self, *args, class_weights=None, label_smoothing=0.0, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.class_weights = class_weights
+            self.label_smoothing = float(label_smoothing) if label_smoothing is not None else 0.0
+
+        def compute_loss(self, model, inputs, return_outputs=False):
+            labels = inputs.get("labels")
+            # forward pass
+            outputs = model(**inputs)
+            logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
+
+            if labels is None:
+                loss = outputs.loss if hasattr(outputs, "loss") else None
+            else:
+                weight = None
+                if self.class_weights is not None:
+                    weight = self.class_weights.to(logits.device)
+                # flatten if necessary
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), weight=weight, label_smoothing=self.label_smoothing)
+
+            return (loss, outputs) if return_outputs else loss
+
+    trainer = WeightedTrainer(
         model=model,
         args=training_args,
         train_dataset=tokenized_train,
@@ -286,6 +331,8 @@ def main():
         data_collator=data_collator,
         compute_metrics=compute_metrics,
         callbacks=callbacks,
+        class_weights=class_weights,
+        label_smoothing=args.label_smoothing,
     )
 
     logger.info("=========== STARTING TRAINING ===========")

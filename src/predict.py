@@ -3,6 +3,8 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import os
 import logging
 import sys
+import json
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO)
 
@@ -34,9 +36,21 @@ def load_model(model_path):
         model.to(device)
         model.eval()
 
+        # Try to load a learned temperature if present (temperature.json)
+        temp_path = Path(model_path) / "temperature.json"
+        temperature = None
+        if temp_path.exists():
+            try:
+                with open(temp_path, "r") as f:
+                    data = json.load(f)
+                    temperature = float(data.get("temperature", None)) if data.get("temperature", None) is not None else None
+                    logging.info("Loaded temperature scaling: %s", temperature)
+            except Exception as e:
+                logging.warning("Could not read temperature file %s: %s", temp_path, e)
+
         logging.info("✅ Model & tokenizer loaded successfully.")
 
-        return tokenizer, model
+        return tokenizer, model, temperature
 
     except Exception as e:
         logging.error(f"❌ Failed to load model: {e}")
@@ -46,7 +60,7 @@ def load_model(model_path):
 # -----------------------------
 #  Run Prediction
 # -----------------------------
-def predict_text(text, tokenizer, model):
+def predict_text(text, tokenizer, model, temperature=None):
     """
     Predicts whether given text is AI-generated or human-written.
     Returns probabilities and predicted class.
@@ -80,10 +94,17 @@ def predict_text(text, tokenizer, model):
         outputs = model(**inputs)
         logits = outputs.logits
 
-    # Softmax for probabilities
+    # Apply temperature scaling if provided
+    if temperature is not None and temperature > 0:
+        try:
+            logits = logits / float(temperature)
+        except Exception:
+            logging.warning("Failed to apply temperature scaling; continuing without it")
+
+    # Softmax for probabilities (use scaled logits)
     probs = torch.softmax(logits, dim=1)[0].cpu().numpy()
 
-    label = int(torch.argmax(logits, dim=1).cpu().numpy())
+    label = int(torch.argmax(logits, dim=1)[0].cpu().numpy())
 
     result = {
         "predicted_label": label,               # 0 = Human, 1 = AI
@@ -106,8 +127,8 @@ if __name__ == "__main__":
     model_path = sys.argv[1]
     input_text = " ".join(sys.argv[2:])
 
-    tokenizer, model = load_model(model_path)
-    result = predict_text(input_text, tokenizer, model)
+    tokenizer, model, temperature = load_model(model_path)
+    result = predict_text(input_text, tokenizer, model, temperature=temperature)
 
     print("\nPrediction Result:")
     print(result)

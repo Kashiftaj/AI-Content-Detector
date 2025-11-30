@@ -8,7 +8,7 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 # -----------------------------
 # Try several likely model paths (local checkpoint first)
 MODEL_CANDIDATES = [
-    "model/distilbert_finetuned/checkpoint-151000",
+    "model/distilbert_finetuned/checkpoint-193000",
     "model/distilbert_finetuned",
     "models/distilbert_finetuned",
 ]

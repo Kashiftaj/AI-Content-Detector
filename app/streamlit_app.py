@@ -1,6 +1,9 @@
 import os
 import streamlit as st
 import torch
+import re
+import json
+from pathlib import Path
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 # -----------------------------
@@ -49,6 +52,17 @@ def load_model():
 
 
 tokenizer, model, model_used = load_model()
+
+# Try to load a learned temperature for calibration if present in the model folder
+temperature = None
+try:
+    if model_used and os.path.isdir(model_used):
+        tpath = Path(model_used) / "temperature.json"
+        if tpath.exists():
+            with open(tpath, "r") as tf:
+                temperature = json.load(tf).get("temperature")
+except Exception:
+    temperature = None
 
 
 # -----------------------------
@@ -128,13 +142,48 @@ def predict_text(text):
 
     with torch.no_grad():
         outputs = model(**inputs)
-        probs = torch.softmax(outputs.logits, dim=1)[0].cpu().numpy()
+        logits = outputs.logits
+        # Apply temperature scaling if available
+        if temperature is not None and isinstance(temperature, (int, float)):
+            try:
+                logits = logits / float(temperature)
+            except Exception:
+                pass
+        probs = torch.softmax(logits, dim=1)[0].cpu().numpy()
 
     # Map numeric label to human-friendly name
     # Common convention: 0=human,1=ai — adapt if your model uses different mapping
     human_prob = float(probs[0])
     ai_prob = float(probs[1]) if probs.shape[0] > 1 else 1.0 - human_prob
     return {"human_prob": human_prob, "ai_prob": ai_prob}
+
+
+def predict_sentences(sentences, batch_size=32):
+    """Predict AI probability for a list of sentences (batched). Returns list of ai_probs."""
+    if tokenizer is None or model is None:
+        return [None] * len(sentences)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    ai_probs = []
+    for i in range(0, len(sentences), batch_size):
+        batch = sentences[i:i+batch_size]
+        enc = tokenizer(batch, truncation=True, padding=True, return_tensors="pt")
+        try:
+            enc = {k: v.to(device) for k, v in enc.items()}
+        except Exception:
+            pass
+        with torch.no_grad():
+            out = model(**enc)
+            logits = out.logits
+            if temperature is not None and isinstance(temperature, (int, float)):
+                try:
+                    logits = logits / float(temperature)
+                except Exception:
+                    pass
+            probs = torch.softmax(logits, dim=1).cpu().numpy()
+            for p in probs:
+                ai = float(p[1]) if p.shape[0] > 1 else float(1.0 - p[0])
+                ai_probs.append(ai)
+    return ai_probs
 
 
 # -----------------------------

@@ -1,11 +1,21 @@
 import os
 import json
+import time
+from datetime import datetime
 import logging
+import argparse
 import pandas as pd
 import torch
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+try:
+    from tqdm import tqdm
+except Exception:
+    tqdm = None
 import matplotlib.pyplot as plt
-import seaborn as sns
+try:
+    import seaborn as sns
+except Exception:
+    sns = None
 from transformers import DistilBertForSequenceClassification, DistilBertTokenizerFast
 
 # -----------------------------------------------------
@@ -39,9 +49,22 @@ def load_model(model_dir):
 def save_confusion_matrix(y_true, y_pred, out_path):
     cm = confusion_matrix(y_true, y_pred)
     plt.figure(figsize=(6, 4))
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
-                xticklabels=["Human", "AI"],
-                yticklabels=["Human", "AI"])
+    if sns is not None:
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+                    xticklabels=["Human", "AI"],
+                    yticklabels=["Human", "AI"])
+    else:
+        # Fallback to matplotlib if seaborn isn't installed
+        plt.imshow(cm, interpolation='nearest', cmap='Blues')
+        plt.colorbar()
+        thresh = cm.max() / 2.
+        for i in range(cm.shape[0]):
+            for j in range(cm.shape[1]):
+                plt.text(j, i, format(cm[i, j], 'd'),
+                         horizontalalignment="center",
+                         color="white" if cm[i, j] > thresh else "black")
+        plt.xticks([0, 1], ["Human", "AI"])
+        plt.yticks([0, 1], ["Human", "AI"])
     plt.title("Confusion Matrix")
     plt.xlabel("Predicted")
     plt.ylabel("Actual")
@@ -55,7 +78,10 @@ def save_confusion_matrix(y_true, y_pred, out_path):
 # Evaluate Model
 # -----------------------------------------------------
 def evaluate_model(model_dir, test_file, output_metrics="outputs/logs/metrics.json",
-                   output_plot="outputs/plots/confusion_matrix.png"):
+                   output_plot="outputs/plots/confusion_matrix.png",
+                   batch_size: int = 64,
+                   status_file: str | None = None,
+                   verbose: bool = True):
 
     # Load model
     model, tokenizer, device = load_model(model_dir)
@@ -72,22 +98,46 @@ def evaluate_model(model_dir, test_file, output_metrics="outputs/logs/metrics.js
 
     all_preds = []
 
-    logger.info("Running evaluation...")
+    logger.info("Running evaluation in batches... total=%d examples, batch_size=%d", len(texts), batch_size)
+    processed = 0
+    all_preds = []
 
-    for text in texts:
-        inputs = tokenizer(
-            text,
-            truncation=True,
-            padding=True,
-            max_length=256,
-            return_tensors="pt"
-        ).to(device)
+    iterator = range(0, len(texts), batch_size)
+    if tqdm is not None and verbose:
+        iterator = tqdm(iterator, desc="Evaluating", unit="batch")
 
+    for i in iterator:
+        batch_texts = texts[i:i+batch_size]
+        enc = tokenizer(batch_texts, truncation=True, padding=True, max_length=256, return_tensors="pt")
+        enc = {k: v.to(device) for k, v in enc.items()}
         with torch.no_grad():
-            outputs = model(**inputs)
+            outputs = model(**enc)
             probs = torch.softmax(outputs.logits, dim=1)
-            pred_label = torch.argmax(probs, dim=1).item()
-            all_preds.append(pred_label)
+            preds = torch.argmax(probs, dim=1).cpu().tolist()
+            all_preds.extend(preds)
+        processed += len(batch_texts)
+
+        # Periodically write status to status_file (if provided) so you can inspect progress
+        if status_file:
+            try:
+                partial_acc = None
+                if len(all_preds) > 0:
+                    partial_acc = float(accuracy_score(labels[:processed], all_preds))
+                status = {
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "processed": processed,
+                    "total": len(texts),
+                    "partial_accuracy": partial_acc,
+                    "last_batch_size": len(batch_texts)
+                }
+                os.makedirs(os.path.dirname(status_file), exist_ok=True)
+                with open(status_file, "w") as sf:
+                    json.dump(status, sf)
+            except Exception:
+                logger.exception("Failed to write status file %s", status_file)
+
+        if verbose:
+            logger.info("Processed %d/%d", processed, len(texts))
 
     # Metrics
     acc = accuracy_score(labels, all_preds)
@@ -122,9 +172,25 @@ def evaluate_model(model_dir, test_file, output_metrics="outputs/logs/metrics.js
 # Script entry point
 # -----------------------------------------------------
 if __name__ == "__main__":
-    MODEL_DIR = "models/distilbert_finetuned"
-    TEST_FILE = "data/processed/test.csv"
+    parser = argparse.ArgumentParser("Evaluate model on test set")
+    parser.add_argument("--model_path", default="model/distilbert_finetuned", help="Path to model dir")
+    parser.add_argument("--test_file", default="data/processed/test.csv", help="Path to test CSV")
+    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--out_metrics", default="outputs/logs/metrics.json")
+    parser.add_argument("--out_plot", default="outputs/plots/confusion_matrix.png")
+    parser.add_argument("--status_file", default=None, help="Path to JSON status file to write per-batch progress")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging and tqdm")
+    args = parser.parse_args()
 
-    metrics = evaluate_model(MODEL_DIR, TEST_FILE)
+    # Use provided args
+    metrics = evaluate_model(
+        args.model_path,
+        args.test_file,
+        output_metrics=args.out_metrics,
+        output_plot=args.out_plot,
+        batch_size=args.batch_size,
+        status_file=args.status_file,
+        verbose=args.verbose,
+    )
     print("\nEvaluation Complete!")
     print(json.dumps(metrics, indent=4))

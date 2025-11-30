@@ -6,6 +6,7 @@ httpx>=0.28.1
 httpcore==1.0.9
 torch==2.9.1
 perft==0.5.0
+seaborn==0.12.2
 pandas
 numpy
 scikit-learn

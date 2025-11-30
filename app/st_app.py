@@ -1,5 +1,6 @@
 import streamlit as st
 import torch
+import os
 import re
 import json
 from pathlib import Path
@@ -10,14 +11,40 @@ import io
 # -----------------------------
 # CONFIG
 # -----------------------------
-MODEL_HF = "kashiftaj/ai-content-detector"  # Always use HF Hub first
+MODEL_HF = "kashiftaj/ai-content-detector"  # HF repo id to load latest uploaded model
 DEMO_MODEL = "distilbert-base-uncased-finetuned-sst-2-english"
+
+# Local candidates to try before falling back to HF hub (helps offline/local testing)
+MODEL_CANDIDATES = [
+    "model/distilbert_finetuned/checkpoint-193000",
+    "model/distilbert_finetuned",
+    "models/distilbert_finetuned",
+]
 
 # -----------------------------
 # LOAD MODEL
 # -----------------------------
 @st.cache_resource
 def load_model():
+    # Prefer local checkpoints if available
+    for p in MODEL_CANDIDATES:
+        if os.path.exists(p):
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(p)
+                model = AutoModelForSequenceClassification.from_pretrained(p)
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                model.to(device)
+                model.eval()
+                return tokenizer, model, p
+            except Exception as e:
+                # If safetensors present but package missing, show hint
+                if os.path.exists(os.path.join(p, "model.safetensors")):
+                    st.warning(
+                        "Local model at %s looks like it was saved with safetensors. If loading fails, run: `pip install safetensors`." % p
+                    )
+                # otherwise try next candidate
+
+    # Try loading from HF hub (latest uploaded model)
     try:
         tokenizer = AutoTokenizer.from_pretrained(MODEL_HF)
         model = AutoModelForSequenceClassification.from_pretrained(MODEL_HF)
@@ -165,22 +192,39 @@ if detect_button:
         st.warning("⚠ Please enter some text or upload a supported file.")
     else:
         with st.spinner("Analyzing…"):
-            result = predict_text(text_to_check)
-
-        if result is None:
-            st.error("Could not run prediction.")
-        else:
-            ai_score = result["ai_prob"]
-            st.subheader("🔎 Detection Result")
-            st.write(f"**AI-generated Probability:** `{ai_score*100:.2f}%`")
-
-            if ai_score > 0.7:
-                st.error("⚠ This text is likely AI-generated.")
-            elif ai_score > 0.4:
-                st.warning("⚠ This text may contain AI-generated patterns.")
+            # Split on dot+space to get sentences; keep it simple to avoid heavy NLP deps
+            sentences = [s.strip() for s in re.split(r"\.[\s\n]*", text_to_check) if s.strip()]
+            if not sentences:
+                st.error("Could not parse any sentences from the input.")
             else:
-                st.success("✅ This text is likely human-written.")
+                # Predict per-sentence (batched)
+                ai_probs = predict_sentences(sentences, batch_size=32)
 
-            # Show raw probabilities
-            st.markdown("**Details**")
-            st.write({"human_prob": f"{result['human_prob']:.4f}", "ai_prob": f"{result['ai_prob']:.4f}"})
+                # Aggregate: simple average of per-sentence AI probabilities
+                valid_probs = [p for p in ai_probs if p is not None]
+                if not valid_probs:
+                    st.error("Model did not return predictions.")
+                else:
+                    avg_ai = float(sum(valid_probs) / len(valid_probs))
+                    ai_percent = avg_ai * 100.0
+                    human_percent = 100.0 - ai_percent
+
+                    st.subheader("🔎 Detection Result")
+                    st.write(f"**AI-generated Probability:** `{ai_percent:.2f}%`  — Human: `{human_percent:.2f}%`")
+
+                    # Verdict
+                    if ai_percent > 70.0:
+                        st.error("⚠ This text is likely AI-generated.")
+                    elif ai_percent > 40.0:
+                        st.warning("⚠ This text may contain AI-generated patterns.")
+                    else:
+                        st.success("✅ This text is likely human-written.")
+
+                    # Show per-sentence breakdown
+                    st.markdown("**Per-sentence breakdown**")
+                    for i, (sent, prob) in enumerate(zip(sentences, ai_probs), start=1):
+                        if prob is None:
+                            display = "n/a"
+                        else:
+                            display = f"{prob*100:.2f}% AI"
+                        st.write(f"{i}. {sent} — **{display}**")

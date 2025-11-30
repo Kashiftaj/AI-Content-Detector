@@ -8,7 +8,7 @@ env/
 
 # Model files
 model/*
-models/distilbert_finetuned/
+models/distilbert_finetuned/*
 *.bin
 
 # Jupyter Notebook checkpoints
